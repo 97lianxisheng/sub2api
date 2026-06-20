@@ -140,3 +140,54 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 # Run the application (entrypoint fixes /app/data ownership then execs as sub2api)
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["/app/sub2api"]
+
+# -----------------------------------------------------------------------------
+# Stage 5: Bundle Runtime (sub2api + PostgreSQL + Redis, for HF Space / GHCR)
+# Build: docker build --target bundle -t ghcr.io/<owner>/<repo>:latest .
+# -----------------------------------------------------------------------------
+FROM ${POSTGRES_IMAGE} AS bundle
+
+RUN apk add --no-cache \
+    redis \
+    supervisor \
+    su-exec \
+    wget \
+    curl \
+    ca-certificates \
+    tzdata \
+    && rm -rf /var/cache/apk/*
+
+RUN addgroup -g 1000 sub2api && \
+    adduser -u 1000 -G sub2api -s /bin/sh -D sub2api
+
+WORKDIR /app
+
+COPY --from=backend-builder --chown=sub2api:sub2api /app/sub2api /app/sub2api
+COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources
+RUN mkdir -p /app/data && chown sub2api:sub2api /app/data
+
+COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY deploy/bundle-entrypoint.sh /app/bundle-entrypoint.sh
+COPY deploy/bundle-supervisord.conf /etc/supervisord.conf
+RUN chmod +x /app/docker-entrypoint.sh /app/bundle-entrypoint.sh
+
+ENV AUTO_SETUP=true \
+    DATABASE_HOST=127.0.0.1 \
+    DATABASE_PORT=5432 \
+    DATABASE_USER=sub2api \
+    DATABASE_DBNAME=sub2api \
+    REDIS_HOST=127.0.0.1 \
+    REDIS_PORT=6379 \
+    SERVER_HOST=0.0.0.0 \
+    SERVER_PORT=7860 \
+    POSTGRES_USER=sub2api \
+    POSTGRES_PASSWORD=sub2api \
+    POSTGRES_DB=sub2api \
+    PGDATA=/var/lib/postgresql/data
+
+EXPOSE 7860
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=5 \
+    CMD sh -c 'wget -q -T 5 -O /dev/null http://localhost:${SERVER_PORT:-7860}/health || exit 1'
+
+ENTRYPOINT ["/app/bundle-entrypoint.sh"]
